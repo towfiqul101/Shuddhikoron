@@ -1,7 +1,7 @@
 {
-  "name": "news-wizard",
+  "name": "shuddhikoron",
   "version": "1.0.0",
-  "description": "বাংলা সংবাদ সম্পাদক এবং বানান পরীক্ষক",
+  "description": "শুদ্ধিকরণ — বাংলা বানান পরীক্ষা ও সংবাদ সম্পাদক",
   "private": true,
   "scripts": {
     "dev": "next dev",
