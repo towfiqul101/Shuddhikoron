@@ -1,4 +1,4 @@
-import { callGemini, SPELL_CHECK_PROMPT, SPELL_CHECK_SCHEMA } from "../gemini.js";
+import { checkSpellingWithGemini, checkSpellingWithGroq } from "../gemini";
 
 export async function POST(request) {
   try {
@@ -6,22 +6,25 @@ export async function POST(request) {
 
     if (!text || text.trim().length === 0) {
       return Response.json(
-        { errors: [], summary: "কোনো টেক্সট পাঠানো হয়নি।" },
-        { status: 200 }
+        { error: "কোনো টেক্সট দেওয়া হয়নি।" },
+        { status: 400 }
       );
     }
 
-    const result = await callGemini(
-      SPELL_CHECK_PROMPT,
-      `এই বাংলা পাঠটি বানান পরীক্ষা করো:\n\n${text}`,
-      SPELL_CHECK_SCHEMA
-    );
-
-    return Response.json(result, { status: 200 });
+    try {
+      // Primary: Gemini with multi-key rotation
+      const result = await checkSpellingWithGemini(text);
+      return Response.json(result);
+    } catch (geminiError) {
+      console.warn("Gemini সম্পূর্ণ ব্যর্থ, Groq-এ যাচ্ছি:", geminiError.message);
+      // Fallback: Groq
+      const result = await checkSpellingWithGroq(text);
+      return Response.json(result);
+    }
   } catch (error) {
-    console.error("বানান পরীক্ষা ত্রুটি:", error);
+    console.error("Spell check error:", error);
     return Response.json(
-      { error: error.message || "বানান পরীক্ষা ব্যর্থ হয়েছে।" },
+      { error: "বানান পরীক্ষায় সমস্যা হয়েছে। একটু পরে আবার চেষ্টা করুন।" },
       { status: 500 }
     );
   }
