@@ -1,4 +1,4 @@
-import { checkSpellingWithGemini, checkSpellingWithGroq } from "../gemini";
+import { checkSpellingWithGemini } from "../gemini";
 
 export async function POST(request) {
   try {
@@ -11,16 +11,8 @@ export async function POST(request) {
       );
     }
 
-    try {
-      // Primary: Gemini with multi-key rotation
-      const result = await checkSpellingWithGemini(text);
-      return Response.json(result);
-    } catch (geminiError) {
-      console.warn("Gemini সম্পূর্ণ ব্যর্থ, Groq-এ যাচ্ছি:", geminiError.message);
-      // Fallback: Groq
-      const result = await checkSpellingWithGroq(text);
-      return Response.json(result);
-    }
+    const result = await checkSpellingWithGemini(text);
+    return Response.json(result);
   } catch (error) {
     console.error("Spell check error:", error);
     return Response.json(
