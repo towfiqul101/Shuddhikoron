@@ -1,4 +1,4 @@
-import { callGemini, REWRITE_PROMPT, REWRITE_SCHEMA } from "../gemini.js";
+import { rewriteNewsWithGemini, rewriteNewsWithGroq } from "../gemini";
 
 export async function POST(request) {
   try {
@@ -6,26 +6,25 @@ export async function POST(request) {
 
     if (!text || text.trim().length === 0) {
       return Response.json(
-        {
-          rewritten: "",
-          english: "",
-          changes: ["কোনো টেক্সট পাঠানো হয়নি।"],
-        },
-        { status: 200 }
+        { error: "কোনো টেক্সট দেওয়া হয়নি।" },
+        { status: 400 }
       );
     }
 
-    const result = await callGemini(
-      REWRITE_PROMPT,
-      `এই সংবাদটি পুনর্লিখন করো এবং ইংরেজিতে অনুবাদ করো:\n\n${text}`,
-      REWRITE_SCHEMA
-    );
-
-    return Response.json(result, { status: 200 });
+    try {
+      // Primary: Gemini with multi-key rotation
+      const result = await rewriteNewsWithGemini(text);
+      return Response.json(result);
+    } catch (geminiError) {
+      console.warn("Gemini সম্পূর্ণ ব্যর্থ, Groq-এ যাচ্ছি:", geminiError.message);
+      // Fallback: Groq
+      const result = await rewriteNewsWithGroq(text);
+      return Response.json(result);
+    }
   } catch (error) {
-    console.error("সংবাদ পুনর্লিখন ত্রুটি:", error);
+    console.error("Rewrite error:", error);
     return Response.json(
-      { error: error.message || "সংবাদ পুনর্লিখন ব্যর্থ হয়েছে।" },
+      { error: "সংবাদ পুনর্লিখনে সমস্যা হয়েছে। একটু পরে আবার চেষ্টা করুন।" },
       { status: 500 }
     );
   }
