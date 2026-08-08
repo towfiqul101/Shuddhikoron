@@ -1,219 +1,316 @@
-export const SPELL_CHECK_PROMPT = `You are an expert Bengali proofreader and linguist. Your job is to find spelling errors in the provided Bengali text.
+// ============================================================
+// gemini.js — Shuddhikoron AI Engine v4
+// Multi-key rotation: GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3
+// Fallback: Groq (llama-3.3-70b)
+// ============================================================
 
-Follow these strict rules based on বাংলা একাডেমি প্রমিত বাংলা বানানের নিয়ম (২০১২) and খটকা বানান অভিধান:
-১. ই-কার/উ-কার: তৎসম, দেশি ও বিদেশি শব্দে ই-কার বা উ-কার হবে (যেমন: একাডেমি, পল্লি, সরকারি, কাহিনি, ইংরেজি, দিঘি, শাড়ি, অদ্ভুত)।
-২. ণ/ন ও ষ/স/শ: বিদেশি শব্দে 'ণ' বা 'ষ' বসবে না, 'ন' ও 'স/শ' বসবে (যেমন: গভর্নর, হর্ন, স্টল, স্টেশন, মাস্টার, কর্নার, মডার্ন)।
-৩. রেফ: রেফের পর ব্যঞ্জনবর্ণের দ্বিত্ব হবে না (যেমন: অর্জন, কর্ম, সূর্য, কার্যালয়)।
-৪. বিসর্গ (ঃ): শব্দের শেষে বিসর্গ থাকবে না (যেমন: কার্যত, মূলত, প্রধানত)।
-৫. ঙ/ং: সন্ধির ক্ষেত্রে ং হবে (অহংকার, সংগীত)। সন্ধিবদ্ধ না হলে ঙ হবে (অঙ্ক, অঙ্গ, আকাঙ্ক্ষা, আতঙ্ক)।
-৬. কি/কী: হ্যাঁ/না উত্তরের প্রশ্নে 'কি' এবং বর্ণনামূলক প্রশ্নে 'কী' বসবে।
-৭. খটকা বানান: অদ্ভুত (অদ্ভূত নয়), উপযুক্ত (উপযোগী নয়), ইতিমধ্যে (ইতোমধ্যে নয়), ঊর্ধ্বতন (উর্ধতন নয়)।
-৮. সংখ্যা (Numbers): Bengali news text MUST use Bengali numerals (০-৯). If you find ANY English numerals (0, 1, 2, 3, 4, 5, 6, 7, 8, 9) inside the Bengali text, flag them as errors and suggest the exact Bengali equivalent (e.g., "15" -> "১৫", "7" -> "৭").
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-Return ONLY a valid JSON object in this exact format:
+// ============================================================
+// MULTI-KEY POOL
+// Vercel env vars: GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3
+// ============================================================
+const GEMINI_KEYS = [
+  process.env.GEMINI_API_KEY,
+  process.env.GEMINI_API_KEY_2,
+  process.env.GEMINI_API_KEY_3,
+].filter(Boolean);
+
+if (GEMINI_KEYS.length === 0) {
+  console.error("⚠️ কোনো Gemini API key পাওয়া যায়নি!");
+}
+
+let keyIndex = 0;
+function getNextGeminiKey() {
+  const key = GEMINI_KEYS[keyIndex % GEMINI_KEYS.length];
+  keyIndex++;
+  return key;
+}
+
+// ============================================================
+// UTILITY: JSON parser — markdown fence, preamble সব handle করে
+// ============================================================
+function cleanAndParse(text) {
+  if (!text) throw new Error("Empty response from AI");
+  let cleaned = text.trim();
+  cleaned = cleaned.replace(/^```json\s*/i, "").replace(/\s*```$/, "");
+  cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+  cleaned = cleaned.trim();
+  const firstBrace = cleaned.indexOf("{");
+  const firstBracket = cleaned.indexOf("[");
+  let startIdx = -1;
+  if (firstBrace !== -1 && firstBracket !== -1) startIdx = Math.min(firstBrace, firstBracket);
+  else if (firstBrace !== -1) startIdx = firstBrace;
+  else if (firstBracket !== -1) startIdx = firstBracket;
+  if (startIdx > 0) cleaned = cleaned.slice(startIdx);
+  const lastBrace = cleaned.lastIndexOf("}");
+  const lastBracket = cleaned.lastIndexOf("]");
+  const endIdx = Math.max(lastBrace, lastBracket);
+  if (endIdx !== -1 && endIdx < cleaned.length - 1) cleaned = cleaned.slice(0, endIdx + 1);
+  return JSON.parse(cleaned);
+}
+
+function isRateLimitError(error) {
+  const msg = (error?.message || "").toLowerCase();
+  return (
+    msg.includes("429") ||
+    msg.includes("quota") ||
+    msg.includes("rate limit") ||
+    msg.includes("resource_exhausted") ||
+    msg.includes("too many requests")
+  );
+}
+
+// ============================================================
+// SPELL CHECK PROMPT (বাংলা একাডেমি ২০১২ + খটকা বানান)
+// ============================================================
+const SPELL_CHECK_PROMPT = `
+তুমি বাংলা ভাষার একজন বিশেষজ্ঞ বানান পরীক্ষক। তোমার একমাত্র কাজ বাংলা একাডেমি প্রমিত বানান রীতি (২০১২) অনুযায়ী সত্যিকারের ভুল বানান চিহ্নিত করা।
+
+⚠️ সবচেয়ে গুরুত্বপূর্ণ: শুধুমাত্র নিশ্চিত ভুল চিহ্নিত করো। সন্দেহ থাকলে ভুল ধরো না।
+
+════════════════════════════════════════
+অধ্যায় ১ — তৎসম শব্দ (নিয়ম ১.২)
+════════════════════════════════════════
+যেসব তৎসম শব্দে ই ঈ বা উ উ উভয় শুদ্ধ, শুধুমাত্র ই বা উ ব্যবহার হবে।
+✅ সঠিক: কিংবদন্তি, খঞ্জনি, চুল্লি, তরণি, ধমনি, নাড়ি, পঞ্জি, পদবি, পল্লি, ভঙ্গি, মঞ্জরি, যুবতি, রচনাবলি, লহরি, শ্রেণি, সরণি, উর্ণা, উষা
+
+════════════════════════════════════════
+অধ্যায় ২ — অতৎসম শব্দ (নিয়ম ২.১)
+════════════════════════════════════════
+সকল বিদেশি/তদ্ভব/দেশি শব্দে কেবল ই এবং উ ব্যবহার হবে।
+
+✅ এই বানানগুলো সম্পূর্ণ সঠিক — কখনো ভুল ধরবে না:
+একাডেমি, জানুয়ারি, ফেব্রুয়ারি, মার্চ, এপ্রিল, মে, জুন, জুলাই, আগস্ট, সেপ্টেম্বর, অক্টোবর, নভেম্বর, ডিসেম্বর, আরবি, আসামি, ইংরেজি, ইরানি, গাড়ি, বাড়ি, শাড়ি, চাকরি, দাড়ি, দাবি, নানি, পাখি, ফারসি, বাঙালি, মাসি, সরকারি, হিন্দি, হাতি, রানি, টুপি
+
+কী (প্রশ্নবাচক/বিস্ময়সূচক): কী বই? কী আনন্দ!
+কি (হ্যাঁ/না উত্তর): তুমি কি যাবে?
+
+════════════════════════════════════════
+নিয়ম ২.৩ — ও-কার (শব্দের শেষে)
+════════════════════════════════════════
+✅ সঠিক: কালো, ভালো, ছোটো, বড়ো, এগারো, বারো, তেরো, করো, বলো, বসো
+
+════════════════════════════════════════
+নিয়ম ২.৪ — ং এবং ঙ
+════════════════════════════════════════
+✅ সঠিক (ভুল ধরবে না): অঙ্ক, অঙ্গ, আকাঙ্ক্ষা, আতঙ্ক, কঙ্কাল, গঙ্গা, বঙ্গ, শঙ্কা, শৃঙ্খলা, সঙ্গে, সঙ্গী, বাংলা, বাংলাদেশ, রঙিন, বাঙালি
+❌ ভুল: অংক, অংগ
+
+════════════════════════════════════════
+নিয়ম ২.৭ — মূর্ধন্য ণ
+════════════════════════════════════════
+অতৎসম শব্দে ণ ব্যবহার করা যাবে না।
+✅ সঠিক: গভর্নর, হর্ন, ইরান, কোরান, ঝরনা, ধরন, রানি, সোনা
+❌ ভুল: গভর্ণর, হর্ণ
+
+════════════════════════════════════════
+নিয়ম ২.৮ — শ, ষ, স
+════════════════════════════════════════
+বিদেশি শব্দে ষ ব্যবহার করা যাবে না।
+✅ সঠিক: স্টল, স্টেশন, পোস্ট, মাস্টার, হিসাব, জিনিস, বাস, ক্যাশ, টেলিভিশন, মিশন, সেশন
+❌ ভুল: ষ্টল, ষ্টেশন, পোষ্ট, মাষ্টার
+
+════════════════════════════════════════
+অধ্যায় ৩ — বিবিধ
+════════════════════════════════════════
+নিয়ম ৩.৪: আজও, আমারও, কালও (পূর্ণ রূপ)
+নিয়ম ৩.৫: আজই, এখনই (পূর্ণ রূপ)
+
+════════════════════════════════════════
+খটকা বানান — সংবাদমাধ্যমে প্রচলিত ভুল
+════════════════════════════════════════
+❌ অধীনস্ত → ✅ অধীনস্থ
+❌ অনাকাঙ্খা → ✅ অনাকাঙ্ক্ষা
+❌ ইতিমধ্যে → ✅ ইতোমধ্যে
+❌ উপরোক্ত → ✅ উপরিউক্ত
+❌ গভর্ণর → ✅ গভর্নর
+❌ হর্ণ → ✅ হর্ন
+❌ পোষ্ট → ✅ পোস্ট
+❌ ষ্টল → ✅ স্টল
+❌ গ্রেফতার → ✅ গ্রেপ্তার
+❌ পূনরায় / পুণরায় → ✅ পুনরায়
+❌ স্থগীত → ✅ স্থগিত
+❌ ঊর্দ্ধে → ✅ ঊর্ধ্বে
+❌ অদ্ভূত → ✅ অদ্ভুত
+❌ অধোপতন → ✅ অধঃপতন
+
+════════════════════════════════════════
+সংখ্যা
+════════════════════════════════════════
+বাংলা পাঠ্যে ইংরেজি সংখ্যা (1, 2, 3) ভুল → বাংলা সংখ্যা (১, ২, ৩) ব্যবহার করতে হবে।
+
+════════════════════════════════════════
+⚠️ এগুলো কখনো ভুল ধরবে না
+════════════════════════════════════════
+জানুয়ারি, ফেব্রুয়ারি, একাডেমি, গভর্নর, আকাঙ্ক্ষা, শ্রেণি,
+বাড়ি, গাড়ি, শাড়ি, স্টেশন, পোস্ট, স্টল, হর্ন,
+কালো, ভালো, ছোটো, বাংলাদেশ, বাঙালি,
+ব্যক্তির নাম, স্থানের নাম, ইংরেজি শব্দ
+
+════════════════════════════════════════
+OUTPUT FORMAT — শুধু এই JSON, কোনো markdown নয়
+════════════════════════════════════════
 {
   "errors": [
     {
-      "word": "the_wrong_word_found_in_text",
-      "suggestion": "the_correct_spelling",
-      "rule": "Short explanation of the rule in Bengali",
-      "position": "Position in text (e.g., প্রথম বাক্য)"
+      "word": "ভুল শব্দটি হুবহু",
+      "suggestion": "সঠিক বানান",
+      "rule": "সংক্ষিপ্ত বাংলা ব্যাখ্যা"
     }
   ],
-  "summary": "A short summary in Bengali, e.g., '২টি বানান ভুল পাওয়া গেছে।'"
+  "summary": "মোট Xটি বানান ভুল পাওয়া গেছে।"
 }
-If there are no errors, return an empty array for "errors" and a success message in "summary".`;
 
-export const REWRITE_PROMPT = `You are an expert Bangladeshi journalist and editor. Your job is to rewrite the provided Bengali news text to meet professional editorial standards, similar to major Bangladeshi newspapers.
+ভুল না থাকলে: {"errors": [], "summary": "কোনো বানান ভুল পাওয়া যায়নি।"}
+`;
 
-Tasks:
-1. Rewrite the Bengali text to be professional, concise, and in standard journalistic style. Remove colloquialisms.
-2. Translate the newly rewritten Bengali news into professional journalistic English.
-3. List the major editorial changes made (in Bengali).
+// ============================================================
+// NEWS REWRITE PROMPT
+// ============================================================
+const REWRITE_PROMPT = `
+তুমি প্রথম আলো এবং bdnews24.com-এর একজন অভিজ্ঞ সম্পাদক।
 
-Return ONLY a valid JSON object in this exact format:
+লেখার মান:
+- প্রমিত বাংলা (বাংলা একাডেমি ২০১২)
+- সংক্ষিপ্ত, স্পষ্ট, সক্রিয় কণ্ঠস্বর
+- পাঁচ 'ক' (কে, কী, কখন, কোথায়, কেন) বজায় রাখো
+- বাংলা সংখ্যা ব্যবহার করো (১, ২, ৩)
+
+শুধুমাত্র এই JSON ফরম্যাটে উত্তর দাও, কোনো markdown নয়:
 {
-  "rewritten": "The rewritten Bengali text.",
-  "english": "The English translation.",
-  "changes": ["'আজকে' → 'আজ' করা হয়েছে", "বাক্যের গঠন সুন্দর করা হয়েছে"]
+  "rewritten": "পুনর্লিখিত বাংলা সংবাদ",
+  "english": "English translation",
+  "changes": ["পরিবর্তন ১", "পরিবর্তন ২"]
 }
-If no major rewrite is needed, just improve the flow and provide the translation.`;
+`;
 
-// Gemini emitted JSON with a missing closing brace on ~50% of calls when left
-// to free-form generation (measured: 3/6 malformed). Passing an explicit
-// responseSchema switches it to constrained decoding, which fixes it.
-export const SPELL_CHECK_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    errors: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          word: { type: "STRING" },
-          suggestion: { type: "STRING" },
-          rule: { type: "STRING" },
-          position: { type: "STRING" },
-        },
-        required: ["word", "suggestion", "rule", "position"],
-      },
+// ============================================================
+// CORE: single Gemini call with one key
+// ============================================================
+async function callGeminiWithKey(apiKey, systemPrompt, userMessage, temperature = 0.1) {
+  const client = new GoogleGenerativeAI(apiKey);
+  const model = client.getGenerativeModel({
+    model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+    systemInstruction: systemPrompt,
+    generationConfig: {
+      temperature,
+      maxOutputTokens: 4096,
+      // ⚠️ DO NOT add responseMimeType — it silently breaks systemInstruction
     },
-    summary: { type: "STRING" },
-  },
-  required: ["errors", "summary"],
-};
-
-export const REWRITE_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    rewritten: { type: "STRING" },
-    english: { type: "STRING" },
-    changes: { type: "ARRAY", items: { type: "STRING" } },
-  },
-  required: ["rewritten", "english", "changes"],
-};
-
-// flash-lite is the default because gemini-3.5-flash is capped at 20 requests
-// per day on the free tier. Quota is per-model, so switching models via
-// GEMINI_MODEL also switches to that model's separate allowance.
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
-
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-
-// Gemini 3.x flash models think by default, and thinking tokens are drawn from
-// the same output budget. 4096 was low enough that a full news article could
-// consume the entire budget on reasoning and return zero visible text.
-const MAX_OUTPUT_TOKENS = 8192;
-
-/**
- * Strips ```json fences if the model wraps its answer despite responseMimeType.
- */
-function stripCodeFence(raw) {
-  let cleaned = raw.trim();
-  const fence = "```";
-
-  if (cleaned.startsWith(fence)) {
-    // Drop the opening fence plus any language tag on that first line.
-    const firstNewline = cleaned.indexOf("\n");
-    cleaned = firstNewline === -1 ? "" : cleaned.slice(firstNewline + 1);
-  }
-
-  if (cleaned.endsWith(fence)) {
-    cleaned = cleaned.slice(0, -fence.length);
-  }
-
-  return cleaned.trim();
+  });
+  const result = await model.generateContent(userMessage);
+  return result.response.text();
 }
 
-/**
- * One round-trip to Gemini. Returns { parsed } on success, or { retryable }
- * when the response arrived but could not be parsed.
- */
-async function attempt(apiKey, systemPrompt, userText, responseSchema) {
-  let response;
-  try {
-    response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: systemPrompt }] },
-        contents: [{ role: "user", parts: [{ text: userText }] }],
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: MAX_OUTPUT_TOKENS,
-          responseMimeType: "application/json",
-          // Constrained decoding. Without this the model intermittently
-          // omitted the closing brace and JSON.parse blew up.
-          ...(responseSchema ? { responseSchema } : {}),
+// ============================================================
+// ROTATION: rate limit হলে next key try করো
+// ============================================================
+async function callGeminiWithRotation(systemPrompt, userMessage, temperature = 0.1) {
+  const totalKeys = GEMINI_KEYS.length;
+  if (totalKeys === 0) throw new Error("কোনো Gemini API key নেই।");
+
+  let lastError;
+  for (let attempt = 0; attempt < totalKeys; attempt++) {
+    const key = getNextGeminiKey();
+    try {
+      return await callGeminiWithKey(key, systemPrompt, userMessage, temperature);
+    } catch (error) {
+      lastError = error;
+      if (isRateLimitError(error)) {
+        console.warn(`Gemini key ${attempt + 1}/${totalKeys} rate limited, rotating...`);
+        continue;
+      }
+      throw error; // rate limit ছাড়া অন্য error → immediately throw
+    }
+  }
+  throw lastError; // সব key exhausted → Groq fallback হবে
+}
+
+// ============================================================
+// SPELL CHECK — Gemini (rotation) → Groq fallback
+// ============================================================
+export async function checkSpellingWithGemini(text) {
+  const userMsg = `নিচের বাংলা পাঠ্যের বানান পরীক্ষা করো। শুধুমাত্র নিশ্চিত ভুল চিহ্নিত করো:\n\n${text}`;
+  const responseText = await callGeminiWithRotation(SPELL_CHECK_PROMPT, userMsg, 0.1);
+  const parsed = cleanAndParse(responseText);
+  if (!parsed.errors || !Array.isArray(parsed.errors)) {
+    return { errors: [], summary: "কোনো বানান ভুল পাওয়া যায়নি।" };
+  }
+  return parsed;
+}
+
+export async function checkSpellingWithGroq(text) {
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: SPELL_CHECK_PROMPT },
+        {
+          role: "user",
+          content: `নিচের বাংলা পাঠ্যের বানান পরীক্ষা করো। শুধুমাত্র নিশ্চিত ভুল চিহ্নিত করো:\n\n${text}`,
         },
-      }),
-    });
-  } catch (networkError) {
-    throw new Error(`Gemini API-তে পৌঁছানো যায়নি: ${networkError.message}`);
+      ],
+      temperature: 0.1,
+      max_tokens: 4096,
+    }),
+  });
+  if (!response.ok) throw new Error(`Groq API error: ${response.status}`);
+  const data = await response.json();
+  const parsed = cleanAndParse(data.choices?.[0]?.message?.content);
+  if (!parsed.errors || !Array.isArray(parsed.errors)) {
+    return { errors: [], summary: "কোনো বানান ভুল পাওয়া যায়নি।" };
   }
-
-  const rawBody = await response.text();
-
-  let data;
-  try {
-    data = JSON.parse(rawBody);
-  } catch {
-    throw new Error(
-      `Gemini API থেকে অপ্রত্যাশিত উত্তর (HTTP ${response.status}): ${rawBody.slice(0, 300)}`
-    );
-  }
-
-  if (response.status === 429) {
-    throw new Error(
-      "Gemini API-র কোটা শেষ হয়ে গেছে (HTTP 429)। কিছুক্ষণ পর আবার চেষ্টা করুন, অথবা Google AI Studio-তে billing চালু করুন।"
-    );
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      data.error?.message || `Gemini API ব্যর্থ হয়েছে (HTTP ${response.status})`
-    );
-  }
-
-  if (data.promptFeedback?.blockReason) {
-    throw new Error(
-      `Gemini অনুরোধটি ব্লক করেছে (${data.promptFeedback.blockReason})।`
-    );
-  }
-
-  const candidate = data.candidates?.[0];
-
-  if (!candidate) {
-    throw new Error("Gemini কোনো উত্তর ফেরত দেয়নি (no candidates returned)।");
-  }
-
-  // Join every non-thought part rather than assuming parts[0] holds it all.
-  const rawText = (candidate.content?.parts || [])
-    .filter((p) => !p.thought && typeof p.text === "string")
-    .map((p) => p.text)
-    .join("");
-
-  if (candidate.finishReason === "MAX_TOKENS") {
-    throw new Error(
-      "লেখাটি অনেক বড় হওয়ায় Gemini-র উত্তর সম্পূর্ণ হয়নি (MAX_TOKENS)। অনুগ্রহ করে ছোট অংশে ভাগ করে চেষ্টা করুন।"
-    );
-  }
-
-  if (!rawText) {
-    throw new Error(
-      `Gemini খালি উত্তর দিয়েছে (finishReason: ${candidate.finishReason || "UNKNOWN"})।`
-    );
-  }
-
-  const cleaned = stripCodeFence(rawText);
-
-  try {
-    return { parsed: JSON.parse(cleaned) };
-  } catch {
-    // Malformed despite the schema — worth one more roll of the dice.
-    return { retryable: true, snippet: cleaned.slice(-120) };
-  }
+  return parsed;
 }
 
-export async function callGemini(systemPrompt, userText, responseSchema) {
-  const apiKey = process.env.GEMINI_API_KEY;
+// ============================================================
+// NEWS REWRITE — Gemini (rotation) → Groq fallback
+// ============================================================
+export async function rewriteNewsWithGemini(text) {
+  const userMsg = `নিচের সংবাদটি পেশাদার মানে পুনর্লিখন করো:\n\n${text}`;
+  const responseText = await callGeminiWithRotation(REWRITE_PROMPT, userMsg, 0.4);
+  const parsed = cleanAndParse(responseText);
+  if (!parsed.rewritten) throw new Error("AI থেকে পুনর্লিখিত সংবাদ পাওয়া যায়নি।");
+  return {
+    rewritten: parsed.rewritten || "",
+    english: parsed.english || "",
+    changes: parsed.changes || [],
+  };
+}
 
-  // Fail loudly and specifically. Previously a missing key produced a generic
-  // 400 from Google that surfaced to the user as "no results".
-  if (!apiKey) {
-    throw new Error(
-      "GEMINI_API_KEY সেট করা নেই। (GEMINI_API_KEY is not set — add it to .env.local for local dev, and to your Vercel project's Environment Variables for production.)"
-    );
-  }
-
-  let last;
-
-  for (let i = 0; i < 2; i++) {
-    last = await attempt(apiKey, systemPrompt, userText, responseSchema);
-    if (last.parsed) return last.parsed;
-  }
-
-  throw new Error(
-    `Gemini-র উত্তর JSON হিসেবে পড়া যায়নি (২ বার চেষ্টা করেও)। শেষাংশ: ${last.snippet}`
-  );
+export async function rewriteNewsWithGroq(text) {
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: REWRITE_PROMPT },
+        {
+          role: "user",
+          content: `নিচের সংবাদটি পেশাদার মানে পুনর্লিখন করো:\n\n${text}`,
+        },
+      ],
+      temperature: 0.4,
+      max_tokens: 8192,
+    }),
+  });
+  if (!response.ok) throw new Error(`Groq API error: ${response.status}`);
+  const data = await response.json();
+  const parsed = cleanAndParse(data.choices?.[0]?.message?.content);
+  if (!parsed.rewritten) throw new Error("Groq থেকে পুনর্লিখিত সংবাদ পাওয়া যায়নি।");
+  return {
+    rewritten: parsed.rewritten || "",
+    english: parsed.english || "",
+    changes: parsed.changes || [],
+  };
 }
